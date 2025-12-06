@@ -1,0 +1,13 @@
+
+short explanation PPO
+https://spinningup.openai.com/en/latest/algorithms/ppo.html#
+
+
+GAE
+https://arxiv.org/pdf/1506.02438
+
+Reccurent policy and optimization
+https://arxiv.org/pdf/1506.02438
+
+Reference code
+https://github.com/DLR-RM/stable-baselines3/tree/master/stable_baselines3/ppo
