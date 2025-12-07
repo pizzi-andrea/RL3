@@ -17,7 +17,7 @@ class Policy(nn.Module):
         self.N = 8   # envs
         self.M = 256  # trajectory lengths
         self.K = 5    # num actions
-        self.I = 50     # train PPO
+        self.I = 400     # train PPO
         
 
         self.epsilon = 0.2
@@ -74,17 +74,14 @@ class Policy(nn.Module):
         
 
         # ste N parallel envs
-        self.envs = [gym.make('CarRacing-v2', continuous=self.continuous, render_mode='rgb_array', max_episode_steps=4000000_0) for _ in range(self.N)]
-        self.o_next = np.array([env.reset()[0] for env in self.envs], dtype=np.float32)
+        self.envs = [gym.make('CarRacing-v2', continuous=self.continuous, render_mode='rgb_array', max_episode_steps=40_000_000) for _ in range(self.N)]
+        self.o_next = self.to_tensor(np.array([env.reset()[0] for env in self.envs]))
 
         self.d_next = torch.from_numpy(np.zeros(shape=self.N, dtype=bool))
-        
-       
         self.optim = torch.optim.Adam(self.parameters(), lr=3e-4, eps=1e-5) # see p
 
 
     def forward(self, x): 
-        
         x = self.res_blk1(x) 
         x = self.res_blk2(x)
         x = self.res_blk3(x)  
@@ -100,19 +97,20 @@ class Policy(nn.Module):
     def to_tensor(self, x):
         
         if not isinstance(x, torch.Tensor):
-            x = x/255.0
+           
             if len(x.shape) == 4:
-                state = torch.from_numpy(x).to(self.device).permute(0, 3, 1, 2).float()
+                x = torch.from_numpy(x).to(self.device).permute(0, 3, 1, 2).float()
             elif len(x.shape) == 3:
-                state = torch.from_numpy(x).to(self.device).permute(3, 1, 2).float()
+                x = torch.from_numpy(x).to(self.device).permute(3, 1, 2).float()
         else:
             if len(x.shape) == 4:
-                state = x.to(self.device).permute(0, 3, 1, 2).float()
+                x = x.to(self.device).permute(0, 3, 1, 2).float()
             elif len(x.shape) == 3:
-                state = x.to(self.device).permute(3, 1, 2).float()
+                x = x.to(self.device).permute(3, 1, 2).float()
 
+        x = x/255.0
         
-        return state
+        return x
 
     def act(self, state): # in batch
         state = state[np.newaxis,:]
@@ -139,14 +137,13 @@ class Policy(nn.Module):
 
             print(f"[Start PPO iteration: {PPO_epoch}]")
             # buffer D ########################################
-            obs_buf = torch.zeros((self.M, self.N, 96, 96, 3))
+            obs_buf = torch.zeros((self.M, self.N, 3, 96, 96))
             reward_buf = torch.zeros((self.M, self.N))
             values_buf = torch.zeros((self.M, self.N))
             logp_buf = torch.zeros((self.M, self.N))
             action_buf = torch.zeros((self.M, self.N))
             done_buf = torch.zeros((self.M, self.N))
             ##########################################
-            
             
             
             #print(f"--Start rollout phase envs={self.N}, trajectory={self.M}--")
@@ -156,7 +153,7 @@ class Policy(nn.Module):
                 for t in range(self.M):
                     
                     #cache
-                    envs_next_o = self.to_tensor(self.o_next) # (num_envs x (96,96,3))
+                    envs_next_o = self.o_next # (num_envs x (96,96,3))
                     envs_next_d = self.d_next # (num_envs x 1)
 
                     # prepare batchs
@@ -191,15 +188,16 @@ class Policy(nn.Module):
                     # store all data in buffers
 
                     np_next_o = np.stack(next_o_buff)
+                 
                     np_rewards = np.array(current_r, dtype=np.float32)
                     np_dones = np.array(current_d_buf, dtype=np.float32)
 
                     # # update cache
-                    self.o_next = np_next_o
+                    self.o_next = self.to_tensor(np_next_o)
                     self.d_next = torch.from_numpy(np_dones).float()
 
                     reward_buf[t] = torch.from_numpy(np_rewards).float()
-                    obs_buf[t]  = envs_next_o.permute(0, 2, 3, 1) # o(t)
+                    obs_buf[t]  = envs_next_o
                     done_buf[t] = envs_next_d 
                     values_buf[t] = current_value
                     action_buf[t] = curent_action.long()
@@ -209,7 +207,7 @@ class Policy(nn.Module):
                     # next value for TD
                 
                
-                _, _, last_value = self._act(self.to_tensor(self.o_next))
+                _, _, last_value = self._act(self.o_next)
                 last_value = last_value.squeeze() # Assicuriamoci che sia (N,)
 
                 
@@ -248,7 +246,7 @@ class Policy(nn.Module):
 
                 # flat batch 
                 
-                obs_buf = obs_buf.flatten(0,1).permute(0, 3, 1, 2)
+                obs_buf = obs_buf.flatten(0,1)
                 done_buf = done_buf.flatten(start_dim=0)
                 values_buf = values_buf.flatten(start_dim=0)
                 action_buf = action_buf.flatten().long()
@@ -257,12 +255,11 @@ class Policy(nn.Module):
                 advantages = advantages.flatten(start_dim=0)
                 target_return = target_return.flatten(start_dim=0)
 
-                print(f"[GAE={advantages.mean()}]\n MR=[{reward_buf.mean()}]")
                 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
                 
                 
-           
+            print(f"[GAE={advantages.mean()}]\n MR=[{reward_buf.mean()}]")
             # step 2: Learning Phase
             dataset = torch.utils.data.TensorDataset(obs_buf, action_buf, logp_buf, advantages, target_return, values_buf)
             loader = torch.utils.data.DataLoader(dataset, batch_size=128, shuffle=True)
