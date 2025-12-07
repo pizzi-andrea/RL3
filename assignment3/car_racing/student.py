@@ -12,74 +12,75 @@ class Policy(nn.Module):
 
     def __init__(self, device=torch.device('cpu')):
         super(Policy, self).__init__()
-        
-        self.N = 4   # envs
-        self.M = 512  # trajectory lengths
+        self.device = device
+        # hyper-parameters ##########################
+        self.N = 8   # envs
+        self.M = 256  # trajectory lengths
         self.K = 5    # num actions
-        self.I = 2     # train PPO
+        self.I = 50     # train PPO
         
 
-        self.epsilon = 0.1
+        self.epsilon = 0.2
         self.gamma = 0.99
         self.gae_lambda = 0.95
         self.grad_norm = 0.5
-        self.epsilon_v = 0.5
+        self.clip_v = 0.2
+        self.c2 = 0.005 # entropy coeff 1 - entropy
+        self.c1 = 0.1 # entropy coeff 2  - value
+        #############################################
 
-
-        self.c1 = 0.01 # entropy coeff 1 - entropy
-        self.c2 = 0.5 # entropy coeff 2  - value
-        # Resnet 8
+        # CNN backbone ######################################################################
         self.res_blk1 = nn.Sequential(
             nn.Conv2d(in_channels=3, out_channels=32, kernel_size=8, stride=4, bias=True), 
-            nn.BatchNorm2d(num_features=(32)),
             nn.ReLU(),
         )
 
         self.res_blk2 = nn.Sequential(
             nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2, bias=True),
-            nn.BatchNorm2d(num_features=(64)),
             nn.ReLU(),
         )
 
         self.res_blk3 = nn.Sequential(
             nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1, bias=True),
-            nn.BatchNorm2d(num_features=(64)),
             nn.ReLU(),
         )
+        #####################################################################################
             
-        
-
-        
-
-
         self.flatten = nn.Flatten()
 
-
+        # Value function Estimator ########################
         self.V = nn.Sequential(
             nn.Linear(in_features=4096, out_features=4096),
             nn.Tanh(),
-            nn.Linear(in_features=4096, out_features=1024),
+            nn.Linear(in_features=4096, out_features=512),
             nn.Tanh(),
-            nn.Linear(in_features=1024, out_features=1)
+            nn.Linear(in_features=512, out_features=1)
 
         )
+        #####################################################
 
+        # Policy Estimator ##################################
         self.P = nn.Sequential(
             nn.Linear(in_features=4096, out_features=4096),
             nn.Tanh(),
-            nn.Linear(in_features=4096, out_features=1024),
+            nn.Linear(in_features=4096, out_features=512),
             nn.Tanh(),
-            nn.Linear(in_features=1024, out_features=self.K)
+            nn.Linear(in_features=512, out_features=self.K)
         )
+        ######################################################
 
-        self.device = device
-        self.envs = [gym.make('CarRacing-v2', continuous=self.continuous, render_mode='rgb_array') for _ in range(self.N)]
         
+
+        
+
+        # ste N parallel envs
+        self.envs = [gym.make('CarRacing-v2', continuous=self.continuous, render_mode='rgb_array', max_episode_steps=4000000_0) for _ in range(self.N)]
         self.o_next = np.array([env.reset()[0] for env in self.envs], dtype=np.float32)
+
         self.d_next = torch.from_numpy(np.zeros(shape=self.N, dtype=bool))
         
-        self.params = self.parameters()
-        self.optim = torch.optim.Adam(self.params, lr=3e-4, eps=1e-8) # see p
+       
+        self.optim = torch.optim.Adam(self.parameters(), lr=3e-4, eps=1e-5) # see p
 
 
     def forward(self, x): 
@@ -90,29 +91,27 @@ class Policy(nn.Module):
 
         embs = self.flatten(x)
 
-
-
         v = self.V(embs)
         policy_logits = self.P(embs)
         
         return policy_logits, v
-
         #return x
     
     def to_tensor(self, x):
         
         if not isinstance(x, torch.Tensor):
+            x = x/255.0
             if len(x.shape) == 4:
-                state = torch.from_numpy(x).to(self.device).permute(0, 3, 1, 2)
+                state = torch.from_numpy(x).to(self.device).permute(0, 3, 1, 2).float()
             elif len(x.shape) == 3:
-                state = torch.from_numpy(x).to(self.device).permute(3, 1, 2)
+                state = torch.from_numpy(x).to(self.device).permute(3, 1, 2).float()
         else:
             if len(x.shape) == 4:
-                state = x.to(self.device).permute(0, 3, 1, 2)
+                state = x.to(self.device).permute(0, 3, 1, 2).float()
             elif len(x.shape) == 3:
-                state = x.to(self.device).permute(3, 1, 2)
+                state = x.to(self.device).permute(3, 1, 2).float()
 
-        state = state.float() / 255.0
+        
         return state
 
     def act(self, state): # in batch
@@ -121,196 +120,207 @@ class Policy(nn.Module):
         a, _, _ = self._act(state)
         return a.item()
         
-       
-    
     def _act(self, state):
         
         policy_logits, v = self.forward(state)
         dist = torch.distributions.Categorical(logits=policy_logits)
         action = dist.sample()
-
         action_log = dist.log_prob(action)
         return action, action_log, v
 
-    def train(self):
     
-        def GAE(last_values, dones):
-            v_arr = v_buf.clone().cpu().numpy()
-            r_arr = r_buf.clone().cpu().numpy()
-            d_arr = d_buf.clone().cpu().numpy()
 
-            next_values = last_values.clone().cpu().numpy()
-            next_non_terminal = 1.0 - dones.clone().cpu().numpy()
 
-            T = len(v_arr)
-            adv_buff = np.zeros_like(v_arr)
-            last_gae_lam = np.zeros_like(next_values)
-
-            for i in reversed(range(T)):
-                if i == T - 1:
-                    next_vals = next_values
-                    next_non_term = next_non_terminal
-                else:
-                    next_vals = v_arr[i + 1]
-                    next_non_term = 1.0 - d_arr[i + 1]
-
-                delta = r_arr[i] + self.gamma * next_vals * next_non_term - v_arr[i]
-                last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_term * last_gae_lam
-                adv_buff[i] = last_gae_lam
-
-            return adv_buff.flatten(), v_arr.flatten()
-
-        # D # 
-        o_buf = torch.zeros((self.M, self.N, 96, 96, 3))
-        r_buf = torch.zeros((self.M, self.N))
-        v_buf = torch.zeros((self.M, self.N))
-        logp_buf = torch.zeros((self.M, self.N))
-        a_buf = torch.zeros((self.M, self.N))
-        d_buf = torch.zeros((self.M, self.N))
-        # # #
+    def train(self):
+        # anneal learning rate
+        # TODO
+    
         for PPO_epoch in range(1, self.I +1):
 
             print(f"[Start PPO iteration: {PPO_epoch}]")
-            o_buf[:] = 0.
-            r_buf[:] = 0.
-            v_buf[:] = 0.
-            logp_buf[:] = 0.
-            a_buf[:] = 0.
-            d_buf[:] = 0.
+            # buffer D ########################################
+            obs_buf = torch.zeros((self.M, self.N, 96, 96, 3))
+            reward_buf = torch.zeros((self.M, self.N))
+            values_buf = torch.zeros((self.M, self.N))
+            logp_buf = torch.zeros((self.M, self.N))
+            action_buf = torch.zeros((self.M, self.N))
+            done_buf = torch.zeros((self.M, self.N))
+            ##########################################
             
             
             
-
+            #print(f"--Start rollout phase envs={self.N}, trajectory={self.M}--")
             # Step 1: Rollout 
             with torch.no_grad():
                 # horizont M
                 for t in range(self.M):
-                    batch_o_t = self.o_next # computed in previus step
-                    batch_b_t = self.d_next # 
+                    
+                    #cache
+                    envs_next_o = self.to_tensor(self.o_next) # (num_envs x (96,96,3))
+                    envs_next_d = self.d_next # (num_envs x 1)
 
+                    # prepare batchs
 
                     # actor 
-                    batch_a_t, batch_log_t, batch_v_t = self._act(self.to_tensor(batch_o_t))
-
-                
-                    # store and remove batch
-                    v_buf[t, :] = batch_v_t.squeeze()
-                    a_buf[t] = batch_a_t.flatten()
-                    logp_buf[t, :] = batch_log_t.squeeze()
+                    curent_action, current_action_logp, current_value = self._act(envs_next_o)
                     
+                    # remove batch 
+                    current_value = torch.squeeze(current_value, dim=1)
+                    
+                    #rollout phase
 
-                    # parallel step execution (for each env)
+                    next_o_buff = []
+                    current_d_buf = []
+                    current_r = []
+                    
+                    # parallel execution
                     for i in range(self.N):
                         # rollout phase
-
-                        o_next_ti, r_ti, terminated_i, truncated_i, _ = self.envs[i].step(batch_a_t[i].item())
                         
-                        # Update buffer with data get by rollout phase
-                        o_buf[t,i] = torch.from_numpy(batch_o_t[i])
-                        d_buf[t,i] = batch_b_t[i]
-                        r_buf[t,i] = torch.tensor(r_ti)
+                        o, r, terminated, truncated, _ = self.envs[i].step(curent_action[i].item())
+                        done = (terminated or truncated)
 
-                        # update env i state
-                        self.d_next[i] = (truncated_i or terminated_i)
-                        
-                        # reset env if ended
-                        if terminated_i or truncated_i:
-                            self.o_next[i] = self.envs[i].reset()[0]
-                        else:
-                            self.o_next[i] = o_next_ti
+                        current_r.append(r)
+                        current_d_buf.append(done)
+
+                        if done:
+                            o = self.envs[i].reset()[0]
+
+                        next_o_buff.append(o)
+
+                    # store all data in buffers
+
+                    np_next_o = np.stack(next_o_buff)
+                    np_rewards = np.array(current_r, dtype=np.float32)
+                    np_dones = np.array(current_d_buf, dtype=np.float32)
+
+                    # # update cache
+                    self.o_next = np_next_o
+                    self.d_next = torch.from_numpy(np_dones).float()
+
+                    reward_buf[t] = torch.from_numpy(np_rewards).float()
+                    obs_buf[t]  = envs_next_o.permute(0, 2, 3, 1) # o(t)
+                    done_buf[t] = envs_next_d 
+                    values_buf[t] = current_value
+                    action_buf[t] = curent_action.long()
+                    logp_buf[t] = current_action_logp
+        
+                    
+                    # next value for TD
                 
                
-                _, _, last_values = self._act(self.to_tensor(self.o_next))
-                last_values = last_values.squeeze() # Assicuriamoci che sia (N,)
+                _, _, last_value = self._act(self.to_tensor(self.o_next))
+                last_value = last_value.squeeze() # Assicuriamoci che sia (N,)
 
-            # step 2: Learning Phase
-
-
-            A, R = GAE(last_values, self.d_next)
-            A = torch.from_numpy(A)
-            R = torch.from_numpy(R)
-            #r_flat = r_buf.flatten()
-            v_buf = v_buf.flatten()
-            logp_flat = logp_buf.flatten()
-            a_flat = a_buf.flatten()
-            #d_flat = d_buf.flatten()
-            o_flat = o_buf.reshape(self.M * self.N, *o_buf.shape[2:])
-            
-            
-    
-            #print(a_flat.shape)
-            #print(logp_flat.shape)
-            #print(A.shape)
-            #print(R.shape)
-            #print(v_buf.shape)
-            dataset = torch.utils.data.TensorDataset(
-                o_flat,
-                a_flat,
-                logp_flat,
-                A,
-                R,
-                v_buf,
                 
-            )
+                # compute Advantages and TD error foreach envs and step
+                #Ah = self.GAE_horizont(last_values, values_buf, reward_buf, done_buf)
+                #Rh = self.TD_gamma_horizont(Ah, values_buf)
+                
+           
+                advantages = torch.zeros_like(reward_buf)
+                last_gae_lam = 0
+                for t in reversed(range(self.M)):
+                    if t == self.M - 1:
+                        next_non_terminal = 1.0 - self.d_next # Se l'ultimo step è done, next_value è ignorato
+                        next_val = last_value
+                    else:
+                        next_non_terminal = 1.0 - done_buf[t+1]
+                        next_val = values_buf[t+1]
+                    
+                    delta = reward_buf[t] + self.gamma * next_val * next_non_terminal - values_buf[t]
+                    last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
+                    advantages[t] = last_gae_lam
+                
+                
 
-            BS = 64
-            loader  = torch.utils.data.DataLoader(dataset, batch_size=BS, shuffle=True)
-            EPOCHS = 4
+
+                target_return = advantages + values_buf
+
+                
+            
+                    
+                #print(a_flat.shape)
+                #print(logp_flat.shape)
+                #print(A.shape)
+                #print(R.shape)
+                #print(v_buf.shape)
+
+                # flat batch 
+                
+                obs_buf = obs_buf.flatten(0,1).permute(0, 3, 1, 2)
+                done_buf = done_buf.flatten(start_dim=0)
+                values_buf = values_buf.flatten(start_dim=0)
+                action_buf = action_buf.flatten().long()
+                logp_buf = logp_buf.flatten(start_dim=0)
+                reward_buf = reward_buf.flatten(start_dim=0)
+                advantages = advantages.flatten(start_dim=0)
+                target_return = target_return.flatten(start_dim=0)
+
+                print(f"[GAE={advantages.mean()}]\n MR=[{reward_buf.mean()}]")
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+                
+                
+           
+            # step 2: Learning Phase
+            dataset = torch.utils.data.TensorDataset(obs_buf, action_buf, logp_buf, advantages, target_return, values_buf)
+            loader = torch.utils.data.DataLoader(dataset, batch_size=128, shuffle=True)
+            EPOCHS = 3
             
             # sub-step 2.1 Train for n epochs
             for epoch in range(1, EPOCHS +1):
-
-                
-                print(f"[train epoch: {epoch}]")
+ 
+                #print(f"[train epoch: {epoch}]")
                 loss_epoch = 0
                 c = 0
-                for o, a, logpa, adv, td, v in loader:
-                    logpa = logpa.detach()
-                    adv = adv.detach()
-                    td = td.detach()
-                    v = v.detach()
-
-                    logpa = logpa.to(self.device)
-                    adv = adv.to(self.device)
-                    td = td.to(self.device)
-                    a = a.to(self.device)
+                for obs, action, logp, advantage, target_return, value in loader:
                     
-                    action_logits, values = self.forward(self.to_tensor(o))
-                    dist = torch.distributions.Categorical(logits=action_logits)
-
-                    action_log = dist.log_prob(a)
-
+                    obs = obs.to(self.device)
+                    action = action.to(self.device)
+                    logp = logp.to(self.device)
+                    advantage = advantage.to(self.device)
+                    target_return = target_return.to(self.device)
                     
-                    ratio = torch.exp(action_log - logpa)
-                    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+                    #advantage = (advantage - torch.mean(advantage))/(torch.std(advantage) + 1e-8)
+                    # ratio computation
                     
-                    # Policy (critic) loss
-                    policy_ratio = adv * ratio
-                    policy_clip = adv * torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon)
+                    policy_logits, current_values = self.forward(obs)
+                    current_values = current_values.flatten()
+                    dist = torch.distributions.Categorical(logits=policy_logits)
+                    
+                    current_policy_logp = dist.log_prob(action)
+                    ratio = torch.exp(current_policy_logp - logp)
+                    #print(ratio)
+                    
+                    
+                    # policy loss
+                    policy_ratio = advantage * ratio
+                    policy_clip = advantage * torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon)
                     policy_loss = -torch.min(policy_ratio, policy_clip).mean()
-
+                    
                     # Value loss
-                    value_predict = v + torch.clamp(values.squeeze() - v, -self.epsilon_v, self.epsilon_v)
-                    value_loss = F.mse_loss(td, value_predict)
+                    
 
-                    # Entropy
-                    entropy  = -dist.entropy().mean()
-
-                    # final loss 
-                    loss = policy_loss + self.c1*entropy +self.c2 * value_loss
-
-                    # surogate clip loss
-                    self.optim.zero_grad()
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(self.parameters(), self.grad_norm)
-                    self.optim.step()
+                    critic_loss_clip = value + torch.clamp(current_values - value, -self.clip_v, self.clip_v) 
+                    critic_loss = F.mse_loss(target_return, critic_loss_clip)
+                    # entropy term
+                    entropy_loss  = -dist.entropy().mean()
+                    
+                    loss = policy_loss + self.c1 * critic_loss + self.c2 * entropy_loss
 
                     # Calculate approximate form of reverse KL Divergence for early stopping
                     # TODO
 
+                    self.optim.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(self.parameters(), self.grad_norm)
+                    self.optim.step()
+                    
                     c += 1
                     loss_epoch += loss.item()
-                print (f"[epoch {epoch} loss: {loss_epoch/c}]")
+                    #print(f"mean entropy batch {-entropy_loss.item()}")
+                #print (f"[epoch {epoch} loss: {loss_epoch/c}]")
         return 
 
     def save(self):
