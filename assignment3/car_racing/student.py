@@ -4,81 +4,102 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-
-
-
 class Policy(nn.Module):
     continuous = False # you can change this
 
+    # https://youtu.be/MEt6rrxH8W4
+    
+    
     def __init__(self, device=torch.device('cpu')):
+        def layer_init_(layer, std=np.sqrt(2), bias_const=0.0):
+            torch.nn.init.orthogonal_(layer.weight, std)
+            torch.nn.init.constant_(layer.bias, bias_const)
+            return layer
         super(Policy, self).__init__()
+        super(Policy, self).train(True)
         self.device = device
-        # hyper-parameters ##########################
-        self.N = 8   # envs
-        self.M = 256  # trajectory lengths
-        self.K = 5    # num actions
-        self.I = 400     # train PPO
-        
 
+        def _thunk():
+            env = gym.make('CarRacing-v2', continuous=self.continuous, render_mode='rgb_array')
+            env = gym.wrappers.GrayScaleObservation(env, keep_dim=False)
+            env = gym.wrappers.ResizeObservation(env, shape=self.img_size)
+            env = gym.wrappers.FrameStack(env, num_stack=4)
+            return env
+        
+        # hyper-parameters ##########################
+        self.N = 1   # envs
+        self.M = 512  # trajectory lengths
+        self.K = 5    # num actions
+        self.I = 500     # train PPO
+        
+        self.img_size =(96,96)
         self.epsilon = 0.2
         self.gamma = 0.99
         self.gae_lambda = 0.95
         self.grad_norm = 0.5
         self.clip_v = 0.2
-        self.c2 = 0.005 # entropy coeff 1 - entropy
-        self.c1 = 0.1 # entropy coeff 2  - value
+        self.c2 = 0.02 # entropy coeff 1 - entropy
+        self.c1 = 0.5 # value coeff 2  - value
         #############################################
 
         # CNN backbone ######################################################################
         self.res_blk1 = nn.Sequential(
-            nn.Conv2d(in_channels=3, out_channels=32, kernel_size=8, stride=4, bias=True), 
+            layer_init_(nn.Conv2d(in_channels=4, out_channels=32, kernel_size=8, stride=4, bias=True)), 
             nn.ReLU(),
         )
 
         self.res_blk2 = nn.Sequential(
-            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2, bias=True),
+            layer_init_(nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2, bias=True)),
             nn.ReLU(),
         )
 
         self.res_blk3 = nn.Sequential(
-            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1, bias=True),
+            layer_init_(nn.Conv2d (in_channels=64, out_channels=64, kernel_size=3, stride=1, bias=True) ),
             nn.ReLU(),
         )
         #####################################################################################
             
-        self.flatten = nn.Flatten()
+        self.flatten = nn.Sequential(
+            nn.Flatten(),
+            layer_init_(nn.Linear(4096, 1024)),
+            nn.ReLU(),
+        )
 
         # Value function Estimator ########################
         self.V = nn.Sequential(
-            nn.Linear(in_features=4096, out_features=4096),
+            layer_init_(nn.Linear(in_features=1024, out_features=512)),
             nn.Tanh(),
-            nn.Linear(in_features=4096, out_features=512),
+            layer_init_(nn.Linear(in_features=512, out_features=128)),
             nn.Tanh(),
-            nn.Linear(in_features=512, out_features=1)
+            layer_init_(nn.Linear(in_features=128, out_features=1), std=1.)
 
         )
         #####################################################
 
         # Policy Estimator ##################################
         self.P = nn.Sequential(
-            nn.Linear(in_features=4096, out_features=4096),
+            layer_init_(nn.Linear(in_features=1024, out_features=1024)),
             nn.Tanh(),
-            nn.Linear(in_features=4096, out_features=512),
+            layer_init_(nn.Linear(in_features=1024, out_features=512)),
             nn.Tanh(),
-            nn.Linear(in_features=512, out_features=self.K)
+            layer_init_(nn.Linear(in_features=512, out_features=self.K), std=0.01)
         )
         ######################################################
-
-        
-
+        env = gym.make('CarRacing-v2', continuous=self.continuous, render_mode='rgb_array')
+            
+        self.envs = [gym.make('CarRacing-v2', continuous=self.continuous, render_mode='rgb_array') for e in range(self.N)]
+        self.envs = [gym.wrappers.GrayScaleObservation(env, keep_dim=False) for env in self.envs]
+        self.envs = [gym.wrappers.ResizeObservation(env, shape=self.img_size) for env in self.envs]
+        self.envs = [gym.wrappers.FrameStack(env, num_stack=4) for env in self.envs]
         
 
         # ste N parallel envs
-        self.envs = [gym.make('CarRacing-v2', continuous=self.continuous, render_mode='rgb_array', max_episode_steps=40_000_000) for _ in range(self.N)]
-        self.o_next = self.to_tensor(np.array([env.reset()[0] for env in self.envs]))
+        #self.envs = gym.vector.AsyncVectorEnv([_thunk() for _ in range(self.N)])
 
+        self.o_next = self.to_tensor(np.array([env.reset()[0] for env in self.envs]))
         self.d_next = torch.from_numpy(np.zeros(shape=self.N, dtype=bool))
         self.optim = torch.optim.Adam(self.parameters(), lr=3e-4, eps=1e-5) # see p
+        self.scheduler = torch.optim.lr_scheduler.LinearLR(self.optim, start_factor=1.0, end_factor=0, total_iters=self.I)
 
 
     def forward(self, x): 
@@ -86,8 +107,8 @@ class Policy(nn.Module):
         x = self.res_blk2(x)
         x = self.res_blk3(x)  
 
+      
         embs = self.flatten(x)
-
         v = self.V(embs)
         policy_logits = self.P(embs)
         
@@ -99,14 +120,14 @@ class Policy(nn.Module):
         if not isinstance(x, torch.Tensor):
            
             if len(x.shape) == 4:
-                x = torch.from_numpy(x).to(self.device).permute(0, 3, 1, 2).float()
+                x = torch.from_numpy(x).to(self.device).float()
             elif len(x.shape) == 3:
-                x = torch.from_numpy(x).to(self.device).permute(3, 1, 2).float()
+                x = torch.from_numpy(x).to(self.device).float()
         else:
             if len(x.shape) == 4:
-                x = x.to(self.device).permute(0, 3, 1, 2).float()
+                x = x.to(self.device).float()
             elif len(x.shape) == 3:
-                x = x.to(self.device).permute(3, 1, 2).float()
+                x = x.to(self.device).float()
 
         x = x/255.0
         
@@ -126,9 +147,6 @@ class Policy(nn.Module):
         action_log = dist.log_prob(action)
         return action, action_log, v
 
-    
-
-
     def train(self):
         # anneal learning rate
         # TODO
@@ -137,7 +155,7 @@ class Policy(nn.Module):
 
             print(f"[Start PPO iteration: {PPO_epoch}]")
             # buffer D ########################################
-            obs_buf = torch.zeros((self.M, self.N, 3, 96, 96))
+            obs_buf = torch.zeros((self.M, self.N, 4, self.img_size[0], self.img_size[1]))
             reward_buf = torch.zeros((self.M, self.N))
             values_buf = torch.zeros((self.M, self.N))
             logp_buf = torch.zeros((self.M, self.N))
@@ -212,9 +230,6 @@ class Policy(nn.Module):
 
                 
                 # compute Advantages and TD error foreach envs and step
-                #Ah = self.GAE_horizont(last_values, values_buf, reward_buf, done_buf)
-                #Rh = self.TD_gamma_horizont(Ah, values_buf)
-                
            
                 advantages = torch.zeros_like(reward_buf)
                 last_gae_lam = 0
@@ -253,17 +268,12 @@ class Policy(nn.Module):
                 logp_buf = logp_buf.flatten(start_dim=0)
                 reward_buf = reward_buf.flatten(start_dim=0)
                 advantages = advantages.flatten(start_dim=0)
-                target_return = target_return.flatten(start_dim=0)
-
-                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-                
-                
-            print(f"[GAE={advantages.mean()}]\n MR=[{reward_buf.mean()}]")
+                target_return = target_return.flatten(start_dim=0) 
+                print(f"[GAE={advantages.mean()}]\n MR=[{reward_buf.mean()}]")
             # step 2: Learning Phase
             dataset = torch.utils.data.TensorDataset(obs_buf, action_buf, logp_buf, advantages, target_return, values_buf)
-            loader = torch.utils.data.DataLoader(dataset, batch_size=128, shuffle=True)
-            EPOCHS = 3
+            loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=False)
+            EPOCHS = 5
             
             # sub-step 2.1 Train for n epochs
             for epoch in range(1, EPOCHS +1):
@@ -281,7 +291,7 @@ class Policy(nn.Module):
                     
                     #advantage = (advantage - torch.mean(advantage))/(torch.std(advantage) + 1e-8)
                     # ratio computation
-                    
+                    advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
                     policy_logits, current_values = self.forward(obs)
                     current_values = current_values.flatten()
                     dist = torch.distributions.Categorical(logits=policy_logits)
@@ -314,10 +324,12 @@ class Policy(nn.Module):
                     nn.utils.clip_grad_norm_(self.parameters(), self.grad_norm)
                     self.optim.step()
                     
+                    
                     c += 1
                     loss_epoch += loss.item()
                     #print(f"mean entropy batch {-entropy_loss.item()}")
                 #print (f"[epoch {epoch} loss: {loss_epoch/c}]")
+            self.scheduler.step()
         return 
 
     def save(self):
