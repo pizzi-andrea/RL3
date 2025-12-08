@@ -7,10 +7,9 @@ import numpy as np
 class Policy(nn.Module):
     continuous = False # you can change this
 
-    # https://youtu.be/MEt6rrxH8W4
-    
-    
     def __init__(self, device=torch.device('cpu')):
+        
+        # https://youtu.be/MEt6rrxH8W4
         def layer_init_(layer, std=np.sqrt(2), bias_const=0.0):
             torch.nn.init.orthogonal_(layer.weight, std)
             torch.nn.init.constant_(layer.bias, bias_const)
@@ -18,16 +17,9 @@ class Policy(nn.Module):
         super(Policy, self).__init__()
         super(Policy, self).train(True)
         self.device = device
-
-        def _thunk():
-            env = gym.make('CarRacing-v2', continuous=self.continuous, render_mode='rgb_array')
-            env = gym.wrappers.GrayScaleObservation(env, keep_dim=False)
-            env = gym.wrappers.ResizeObservation(env, shape=self.img_size)
-            env = gym.wrappers.FrameStack(env, num_stack=4)
-            return env
         
         # hyper-parameters ##########################
-        self.N = 1   # envs
+        self.N = 8   # envs
         self.M = 512  # trajectory lengths
         self.K = 5    # num actions
         self.I = 500     # train PPO
@@ -44,7 +36,7 @@ class Policy(nn.Module):
 
         # CNN backbone ######################################################################
         self.res_blk1 = nn.Sequential(
-            layer_init_(nn.Conv2d(in_channels=4, out_channels=32, kernel_size=8, stride=4, bias=True)), 
+            layer_init_(nn.Conv2d(in_channels=3, out_channels=32, kernel_size=8, stride=4, bias=True)), 
             nn.ReLU(),
         )
 
@@ -85,21 +77,34 @@ class Policy(nn.Module):
             layer_init_(nn.Linear(in_features=512, out_features=self.K), std=0.01)
         )
         ######################################################
-        env = gym.make('CarRacing-v2', continuous=self.continuous, render_mode='rgb_array')
+        
+        self.envs = gym.make_vec(
+            'CarRacing-v2',
+            num_envs=self.N,
+            vectorization_mode="async",
             
-        self.envs = [gym.make('CarRacing-v2', continuous=self.continuous, render_mode='rgb_array') for e in range(self.N)]
-        self.envs = [gym.wrappers.GrayScaleObservation(env, keep_dim=False) for env in self.envs]
-        self.envs = [gym.wrappers.ResizeObservation(env, shape=self.img_size) for env in self.envs]
-        self.envs = [gym.wrappers.FrameStack(env, num_stack=4) for env in self.envs]
+            # Wrappers pipline
+            wrappers=[ # add in test
+                #lambda env: gym.wrappers.GrayScaleObservation(env, keep_dim=True), # require CV
+                #lambda env: gym.wrappers.ResizeObservation(env, self.img_size),    # not use
+                #lambda env: gym.wrappers.FrameStack(env, num_stack=4)
+            ],
+            
+            # envs costructor parameters
+            continuous=self.continuous,
+            render_mode='rgb_array'
+        )
         
 
         # ste N parallel envs
-        #self.envs = gym.vector.AsyncVectorEnv([_thunk() for _ in range(self.N)])
 
-        self.o_next = self.to_tensor(np.array([env.reset()[0] for env in self.envs]))
+        self.o_next, _ = self.envs.reset()
+       
+        self.o_next = self.to_tensor(self.o_next)
+        
         self.d_next = torch.from_numpy(np.zeros(shape=self.N, dtype=bool))
         self.optim = torch.optim.Adam(self.parameters(), lr=3e-4, eps=1e-5) # see p
-        self.scheduler = torch.optim.lr_scheduler.LinearLR(self.optim, start_factor=1.0, end_factor=0, total_iters=self.I)
+        self.scheduler = torch.optim.lr_scheduler.LinearLR(self.optim, start_factor=1.0, end_factor=0, total_iters=self.I) # lr scheduler
 
 
     def forward(self, x): 
@@ -117,24 +122,34 @@ class Policy(nn.Module):
     
     def to_tensor(self, x):
         
-        if not isinstance(x, torch.Tensor):
-           
+        if isinstance(x, np.ndarray):    
+            
             if len(x.shape) == 4:
-                x = torch.from_numpy(x).to(self.device).float()
+                x = torch.from_numpy(x).to(self.device).float().permute(0,3,1,2)
             elif len(x.shape) == 3:
-                x = torch.from_numpy(x).to(self.device).float()
+                x = torch.from_numpy(x).to(self.device).float().permute(2,0,1)
+        elif isinstance(x, torch.Tensor):
+            if len(x.shape) == 4:
+                x = x.to(self.device).float().permute(0,3,1,2)
+            elif len(x.shape) == 3:
+                x = x.to(self.device).float().permute(2,0,1)
+        elif isinstance(x, list) or isinstance(x, tuple):
+            
+            x = np.array(x)
+            if len(x.shape) == 4:
+                x = torch.from_numpy(x).to(self.device).float().permute(0,3,1,2)
+            elif len(x.shape) == 3:
+                x = torch.from_numpy(x).to(self.device).float().permute(2,0,1)
         else:
-            if len(x.shape) == 4:
-                x = x.to(self.device).float()
-            elif len(x.shape) == 3:
-                x = x.to(self.device).float()
+            raise TypeError("invalid type")
+
 
         x = x/255.0
         
         return x
 
     def act(self, state): # in batch
-        state = state[np.newaxis,:]
+        state = state[np.newaxis,:] # add batch dimension
         state = self.to_tensor(state)
         a, _, _ = self._act(state)
         return a.item()
@@ -142,20 +157,22 @@ class Policy(nn.Module):
     def _act(self, state):
         
         policy_logits, v = self.forward(state)
+        if not self.training:
+            return torch.argmax(policy_logits)
+        
         dist = torch.distributions.Categorical(logits=policy_logits)
         action = dist.sample()
         action_log = dist.log_prob(action)
         return action, action_log, v
 
     def train(self):
-        # anneal learning rate
-        # TODO
     
         for PPO_epoch in range(1, self.I +1):
 
             print(f"[Start PPO iteration: {PPO_epoch}]")
+            
             # buffer D ########################################
-            obs_buf = torch.zeros((self.M, self.N, 4, self.img_size[0], self.img_size[1]))
+            obs_buf = torch.zeros((self.M, self.N, 3, self.img_size[0], self.img_size[1]))
             reward_buf = torch.zeros((self.M, self.N))
             values_buf = torch.zeros((self.M, self.N))
             logp_buf = torch.zeros((self.M, self.N))
@@ -171,7 +188,7 @@ class Policy(nn.Module):
                 for t in range(self.M):
                     
                     #cache
-                    envs_next_o = self.o_next # (num_envs x (96,96,3))
+                    envs_next_o = self.o_next # (num_envs x (3, 96, 96))
                     envs_next_d = self.d_next # (num_envs x 1)
 
                     # prepare batchs
@@ -183,44 +200,35 @@ class Policy(nn.Module):
                     current_value = torch.squeeze(current_value, dim=1)
                     
                     #rollout phase
-
-                    next_o_buff = []
-                    current_d_buf = []
-                    current_r = []
                     
-                    # parallel execution
-                    for i in range(self.N):
-                        # rollout phase
-                        
-                        o, r, terminated, truncated, _ = self.envs[i].step(curent_action[i].item())
-                        done = (terminated or truncated)
-
-                        current_r.append(r)
-                        current_d_buf.append(done)
-
-                        if done:
-                            o = self.envs[i].reset()[0]
-
-                        next_o_buff.append(o)
-
+                    # parallel execution (True parallel)
+                    o, r, terminated, truncated,  infos = self.envs.step(curent_action.numpy())
+                    
+                    
                     # store all data in buffers
+                    dones = terminated | truncated
+                    np_dones = np.array(envs_next_d, dtype=np.float32)
+                    
+                    # save next states
 
-                    np_next_o = np.stack(next_o_buff)
-                 
-                    np_rewards = np.array(current_r, dtype=np.float32)
-                    np_dones = np.array(current_d_buf, dtype=np.float32)
-
-                    # # update cache
-                    self.o_next = self.to_tensor(np_next_o)
+                    #cache
+                    o = self.to_tensor(o)
+                    self.o_next = o
                     self.d_next = torch.from_numpy(np_dones).float()
-
-                    reward_buf[t] = torch.from_numpy(np_rewards).float()
+                    
                     obs_buf[t]  = envs_next_o
-                    done_buf[t] = envs_next_d 
-                    values_buf[t] = current_value
+                    reward_buf[t] = torch.from_numpy(r).float()
                     action_buf[t] = curent_action.long()
                     logp_buf[t] = current_action_logp
-        
+                    values_buf[t] = current_value
+                    
+                    # recover last observatio when env is reset
+                    for i in range(len(dones)):
+                        if dones[i]:
+                            if "final_observation" in infos:
+                                obs_buf[t][i] = self.to_tensor(infos["final_observation"][i])
+                                self.o_next[i] =  o[i]
+                                print(f"Reset env {i}, term_normal={dones[i]}")
                     
                     # next value for TD
                 
@@ -229,7 +237,7 @@ class Policy(nn.Module):
                 last_value = last_value.squeeze() # Assicuriamoci che sia (N,)
 
                 
-                # compute Advantages and TD error foreach envs and step
+                # compute Advantages and target return foreach envs and step
            
                 advantages = torch.zeros_like(reward_buf)
                 last_gae_lam = 0
@@ -270,9 +278,10 @@ class Policy(nn.Module):
                 advantages = advantages.flatten(start_dim=0)
                 target_return = target_return.flatten(start_dim=0) 
                 print(f"[GAE={advantages.mean()}]\n MR=[{reward_buf.mean()}]")
+            
             # step 2: Learning Phase
             dataset = torch.utils.data.TensorDataset(obs_buf, action_buf, logp_buf, advantages, target_return, values_buf)
-            loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=False)
+            loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
             EPOCHS = 5
             
             # sub-step 2.1 Train for n epochs
@@ -307,10 +316,9 @@ class Policy(nn.Module):
                     policy_loss = -torch.min(policy_ratio, policy_clip).mean()
                     
                     # Value loss
-                    
-
                     critic_loss_clip = value + torch.clamp(current_values - value, -self.clip_v, self.clip_v) 
                     critic_loss = F.mse_loss(target_return, critic_loss_clip)
+
                     # entropy term
                     entropy_loss  = -dist.entropy().mean()
                     
