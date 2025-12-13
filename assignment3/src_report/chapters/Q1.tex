@@ -1,0 +1,188 @@
+\documentclass[main.tex]{subfiles}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{cancel}
+\usepackage{bbm}
+
+\begin{document}
+	
+	\section{Question I (Theory)}
+	\subsection{Problem}
+	
+	Suppose an environment with 2 possible actions and a 2-dimensional state representation $x(s) \in \mathbb{R}^2$.
+	Consider the REINFORCE algorithm with the following Linear Function Approximator (LFA) policy:
+	
+	\begin{equation}
+		\pi_w(a=1 \mid s) = \sigma(w^\top x(s))
+	\end{equation}
+	
+	The action is selected as:
+	
+	\begin{equation}
+		a = \mathbb{1}_{\pi_w(a=1 \mid s) > 0.5}
+	\end{equation}
+	
+	where $w^{(0)} = [0.8, 1]^\top$ and $\sigma(t) = \frac{1}{1 + e^{-t}}$.
+	
+	Suppose you run an episode and obtain:
+	
+	\begin{align}
+		x(s_0) &= [1,0]^\top, \quad a_0 = 0, \quad r_1 = 0 \\
+		x(s_1) &= [1,0]^\top, \quad a_1 = 1, \quad r_2 = 1 \\
+		x(s_2) &= [0,1]^\top
+	\end{align}
+	
+	Show the weight update according to the REINFORCE algorithm with $\alpha=0.1$, $\gamma=0.9$.
+	
+	
+	\subsection{Solution}
+	
+	The REINFORCE reinforcement learning algorithm belongs to the class of algorithms known as policy gradient methods. Unlike value-based methods, which learn a value function to derive a policy, policy optimization methods directly learn a policy function $\pi$ that selects actions without consulting a value function. For the policy gradient to be applied, the policy function $\pi_\theta$
+	is parameterized by a differentiable parameter $\theta$.
+	
+	REINFORCE is the simplest algorithm in the Policy gradient methods family.
+	
+	\begin{equation}
+		w_{t+1} = w_t + \alpha \nabla_w \ln \pi_w(a_t \mid s_t)\, G_t
+	\end{equation}
+	
+	The return is defined as:
+	
+	\begin{equation}
+		G_t = \sum_{k=t+1}^{T} \gamma^{k-t-1} R_k .
+	\end{equation}
+	
+	We also use:
+	
+	\begin{equation}
+		\label{eq_policy_zero_fixed}
+		\pi_w(a=0 \mid s) = 1 - \pi_w(a=1 \mid s)
+		= 1 - \sigma(w^\top x(s))
+		= \frac{e^{-w^\top x(s)}}{1 + e^{-w^\top x(s)}} .
+	\end{equation}
+	
+	\subsubsection*{First update ($t=0$)}
+	
+	Since $a_0 = 0$, we use $\pi_w(a_0 \mid s_0)$ from Eq.~\eqref{eq_policy_zero_fixed}.
+	
+	Compute the log-probability:
+	
+	\begin{align}
+		\ln \pi_w(a=0 \mid s_0)
+		&= \ln \left( \frac{e^{-w^\top x(s_0)}}{1 + e^{-w^\top x(s_0)}} \right) \\
+		&= - w^\top x(s_0) - \ln(1 + e^{-w^\top x(s_0)}).
+	\end{align}
+	
+	Gradient:
+	
+	\begin{align}
+		\label{eq_gradient_log_clean}
+		\nabla_w \ln \pi_w(a=0 \mid s_0)
+		&= -x(s_0) + \frac{e^{-w^\top x(s_0)}}{1 + e^{-w^\top x(s_0)}} x(s_0) \\
+		&= -\frac{x(s_0)}{1 + e^{-w^\top x(s_0)}} .
+	\end{align}
+	
+	Return:
+	
+	\begin{align}
+		G_0 &= r_1 + \gamma r_2 = 0 + 0.9 \cdot 1 = 0.9 .
+	\end{align}
+	
+	Update:
+	
+	\begin{align}
+		w_1 &= w_0 + \alpha \nabla_w \ln\pi_w(a_0 \mid s_0) \, G_0.
+	\end{align}
+	
+	Substitute numerical values:
+	
+	\begin{align}
+		w_1 &= 
+		\begin{pmatrix} 0.8 \\ 1 \end{pmatrix}
+		+ 0.1 
+		\left(
+		- \frac{\begin{pmatrix} 1 \\ 0 \end{pmatrix}}
+		{1 + e^{-0.8}}
+		\right)
+		(0.9)
+	\end{align}
+	
+	Thus:
+	
+	\begin{equation}
+		\boxed{
+			w_1 = 
+			\begin{pmatrix}
+				0.738 \\
+				1
+			\end{pmatrix}
+		}
+	\end{equation}
+	
+	\subsubsection*{Second update ($t=1$)}
+	
+	Now $a_1 = 1$, so:
+	
+	\begin{equation}
+		\pi_w(a=1 \mid s_1) = \sigma(w_1^\top x(s_1)).
+	\end{equation}
+	
+	Log-probability:
+	
+	\begin{equation}
+		\ln \pi_w(a=1 \mid s_1)
+		= - \ln\left( 1 + e^{-w_1^\top x(s_1)} \right).
+	\end{equation}
+	
+	Gradient:
+	
+	\begin{align}
+		\nabla_w \ln \pi_w(a=1 \mid s_1)
+		&= \frac{e^{-w_1^\top x(s_1)}}{1 + e^{-w_1^\top x(s_1)}} x(s_1).
+	\end{align}
+	
+	Return:
+	
+	\begin{equation}
+		G_1 = r_2 = 1.
+	\end{equation}
+	
+	Update:
+	
+	\begin{align}
+		w_2 
+		&= 
+		w_1 + \alpha \frac{e^{-w_1^\top x(s_1)}}{1 + e^{-w_1^\top x(s_1)}} x(s_1) \, G_1.
+	\end{align}
+	
+	Substitute values:
+	
+	\begin{equation}
+		w_2 =
+		\begin{pmatrix}
+			0.738\\
+			1
+		\end{pmatrix}
+		+ 0.1 
+		\begin{pmatrix}
+			1\\
+			0
+		\end{pmatrix}
+		\cdot
+		\frac{e^{-0.738}}{1 + e^{-0.738}}
+	\end{equation}
+	
+	Final result:
+	
+	\begin{equation}
+		\boxed{
+			w_2 = 
+			\begin{pmatrix}
+				0.770 \\
+				1
+			\end{pmatrix}
+		}
+	\end{equation}
+	
+\end{document}
