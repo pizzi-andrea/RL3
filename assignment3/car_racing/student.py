@@ -95,7 +95,7 @@ class Policy(nn.Module):
             render_mode='rgb_array'
         )
         
-
+        self.test_env = gym.make('CarRacing-v2', continuous=self.continuous)
         # ste N parallel envs
 
         self.o_next, _ = self.envs.reset()
@@ -108,18 +108,42 @@ class Policy(nn.Module):
 
 
     def forward(self, x): 
+        # visual obs encoder
         x = self.res_blk1(x) 
         x = self.res_blk2(x)
-        x = self.res_blk3(x)  
+        x = self.res_blk3(x)
+        ####################  
 
-      
         embs = self.flatten(x)
         v = self.V(embs)
         policy_logits = self.P(embs)
         
         return policy_logits, v
-        #return x
-    
+
+    def _evaluate(self):
+        env = self.test_env
+        env.reset()
+        n_episodes = 1
+            
+        rewards = []
+        negative_r = 0
+        for episode in range(n_episodes):
+            total_reward = 0
+            done = False
+            s, _ = env.reset()
+            while not done:
+                action = self.act(s)
+                s, reward, terminated, truncated, info = env.step(action)
+                done = terminated or truncated
+                total_reward += reward
+                negative_r += int(reward < 0)
+                if negative_r == 50:
+                    break
+            
+            rewards.append(total_reward)
+            
+        print('Mean Reward:', np.mean(rewards))
+
     def to_tensor(self, x):
         
         if isinstance(x, np.ndarray):    
@@ -151,19 +175,26 @@ class Policy(nn.Module):
     def act(self, state): # in batch
         state = state[np.newaxis,:] # add batch dimension
         state = self.to_tensor(state)
-        a, _, _ = self._act(state)
-        return a.item()
+        x, _, _ = self._act(state)
+        return x.item()
         
     def _act(self, state):
+        """
+        Auxiliar act function for internal train
         
+        :param self:
+        :param state: current observation
+        """
         policy_logits, v = self.forward(state)
         if not self.training:
-            return torch.argmax(policy_logits)
+            # choose in detterministic way the action for gien state
+            return torch.argmax(policy_logits) 
         
+        # use stochastic policy
         dist = torch.distributions.Categorical(logits=policy_logits)
         action = dist.sample()
         action_log = dist.log_prob(action)
-        return action, action_log, v
+        return action, action_log, v # return argumented informations
 
     def train(self):
     
@@ -180,20 +211,19 @@ class Policy(nn.Module):
             done_buf = torch.zeros((self.M, self.N))
             ##########################################
             
-            
-            #print(f"--Start rollout phase envs={self.N}, trajectory={self.M}--")
-            # Step 1: Rollout 
+            # Step 1: Rollout
+            # Recover from N envs observations for time stamp m
             with torch.no_grad():
                 # horizont M
                 for t in range(self.M):
                     
-                    #cache
+                    # cache
                     envs_next_o = self.o_next # (num_envs x (3, 96, 96))
                     envs_next_d = self.d_next # (num_envs x 1)
-
+                    ####################################################
                     # prepare batchs
 
-                    # actor 
+                    # actor use current estimated policy
                     curent_action, current_action_logp, current_value = self._act(envs_next_o)
                     
                     # remove batch 
@@ -203,19 +233,16 @@ class Policy(nn.Module):
                     
                     # parallel execution (True parallel)
                     o, r, terminated, truncated,  infos = self.envs.step(curent_action.numpy())
-                    
-                    
-                    # store all data in buffers
                     dones = terminated | truncated
                     np_dones = np.array(envs_next_d, dtype=np.float32)
                     
-                    # save next states
-
-                    #cache
+                    # store all data in buffers
                     o = self.to_tensor(o)
                     self.o_next = o
                     self.d_next = torch.from_numpy(np_dones).float()
-                    
+                    ################################################
+
+                    # store in buffers
                     obs_buf[t]  = envs_next_o
                     reward_buf[t] = torch.from_numpy(r).float()
                     action_buf[t] = curent_action.long()
@@ -228,47 +255,38 @@ class Policy(nn.Module):
                             if "final_observation" in infos:
                                 obs_buf[t][i] = self.to_tensor(infos["final_observation"][i])
                                 self.o_next[i] =  o[i]
-                                print(f"Reset env {i}, term_normal={dones[i]}")
+                                print(f"Reset env {i}, term_normal={terminated[i]}")
                     
-                    # next value for TD
+                    ############################################################################
                 
-               
+                # Explit next state and cpmpute advantages via GAE procedure
                 _, _, last_value = self._act(self.o_next)
                 last_value = last_value.squeeze() # Assicuriamoci che sia (N,)
-
                 
                 # compute Advantages and target return foreach envs and step
+                # using General Advantages Estimator in backwoard way
            
                 advantages = torch.zeros_like(reward_buf)
                 last_gae_lam = 0
                 for t in reversed(range(self.M)):
-                    if t == self.M - 1:
-                        next_non_terminal = 1.0 - self.d_next # Se l'ultimo step è done, next_value è ignorato
+                    if t == self.M - 1: # start from last timestamp
+                        next_non_terminal = 1.0 - self.d_next 
                         next_val = last_value
-                    else:
+                    else: # applay recursive definition
                         next_non_terminal = 1.0 - done_buf[t+1]
                         next_val = values_buf[t+1]
                     
+                    # compute iter.
                     delta = reward_buf[t] + self.gamma * next_val * next_non_terminal - values_buf[t]
                     last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
                     advantages[t] = last_gae_lam
-                
-                
+                ###########################################################################################
 
+                target_return = advantages + values_buf # TD
 
-                target_return = advantages + values_buf
+                # Learning phase
 
-                
-            
-                    
-                #print(a_flat.shape)
-                #print(logp_flat.shape)
-                #print(A.shape)
-                #print(R.shape)
-                #print(v_buf.shape)
-
-                # flat batch 
-                
+                # flat batch and prepare data
                 obs_buf = obs_buf.flatten(0,1)
                 done_buf = done_buf.flatten(start_dim=0)
                 values_buf = values_buf.flatten(start_dim=0)
@@ -277,19 +295,26 @@ class Policy(nn.Module):
                 reward_buf = reward_buf.flatten(start_dim=0)
                 advantages = advantages.flatten(start_dim=0)
                 target_return = target_return.flatten(start_dim=0) 
-                print(f"[GAE={advantages.mean()}]\n MR=[{reward_buf.mean()}]")
+                
+                ###############################################################
             
-            # step 2: Learning Phase
+            # Prepare train dataset 
             dataset = torch.utils.data.TensorDataset(obs_buf, action_buf, logp_buf, advantages, target_return, values_buf)
             loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
-            EPOCHS = 5
+            ###############################################################################################################
             
-            # sub-step 2.1 Train for n epochs
+            
+            EPOCHS = 5
+
+            print (f"lr: {self.scheduler.get_last_lr()}")
+            # sub-step, Train for n epochs
             for epoch in range(1, EPOCHS +1):
  
-                #print(f"[train epoch: {epoch}]")
-                loss_epoch = 0
+                print(f"[train epoch: {epoch}]")
+                entropy_epoch = 0
                 c = 0
+                
+                # iter. over batchs
                 for obs, action, logp, advantage, target_return, value in loader:
                     
                     obs = obs.to(self.device)
@@ -297,8 +322,8 @@ class Policy(nn.Module):
                     logp = logp.to(self.device)
                     advantage = advantage.to(self.device)
                     target_return = target_return.to(self.device)
+                    value = value.to(self.device)
                     
-                    #advantage = (advantage - torch.mean(advantage))/(torch.std(advantage) + 1e-8)
                     # ratio computation
                     advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
                     policy_logits, current_values = self.forward(obs)
@@ -324,19 +349,23 @@ class Policy(nn.Module):
                     
                     loss = policy_loss + self.c1 * critic_loss + self.c2 * entropy_loss
 
-                    # Calculate approximate form of reverse KL Divergence for early stopping
-                    # TODO
-
+                    
+                    # update
                     self.optim.zero_grad()
                     loss.backward()
+                    
+                    # clipped gradient
                     nn.utils.clip_grad_norm_(self.parameters(), self.grad_norm)
                     self.optim.step()
                     
-                    
+                    # login
                     c += 1
-                    loss_epoch += loss.item()
-                    #print(f"mean entropy batch {-entropy_loss.item()}")
-                #print (f"[epoch {epoch} loss: {loss_epoch/c}]")
+                    entropy_epoch += entropy_loss.item()
+
+                    
+                print (f"[epoch {epoch} entropy: {-1*entropy_loss/c}]")
+               
+            self._evaluate()
             self.scheduler.step()
         return 
 
