@@ -19,10 +19,10 @@ class Policy(nn.Module):
         self.device = device
         
         # hyper-parameters ##########################
-        self.N = 8   # envs
+        self.N = 12   # envs
         self.M = 512  # trajectory lengths
         self.K = 5    # num actions
-        self.I = 500     # train PPO
+        self.I = 1_500     # train PPO
         
         self.img_size =(96,96)
         self.epsilon = 0.2
@@ -136,7 +136,10 @@ class Policy(nn.Module):
                 s, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
                 total_reward += reward
-                negative_r += int(reward < 0)
+                if reward < 0:
+                    negative_r+=1
+                else:
+                    negative_r = 0
                 if negative_r == 50:
                     break
             
