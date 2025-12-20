@@ -22,7 +22,7 @@ class Policy(nn.Module):
         self.N = 12   # envs
         self.M = 512  # trajectory lengths
         self.K = 5    # num actions
-        self.I = 1_500     # train PPO
+        self.I = 600     # train PPO
         
         self.img_size =(96,96)
         self.epsilon = 0.2
@@ -31,7 +31,7 @@ class Policy(nn.Module):
         self.grad_norm = 0.5
         self.clip_v = 0.2
         self.c2 = 0.02 # entropy coeff 1 - entropy
-        self.c1 = 0.5 # value coeff 2  - value
+        self.c1 = 0.25 # value coeff 2  - value
         #############################################
 
         # CNN backbone ######################################################################
@@ -189,10 +189,8 @@ class Policy(nn.Module):
         :param state: current observation
         """
         policy_logits, v = self.forward(state)
-        if not self.training:
-            # choose in detterministic way the action for gien state
-            return torch.argmax(policy_logits) 
-        
+        print(self.training)
+
         # use stochastic policy
         dist = torch.distributions.Categorical(logits=policy_logits)
         action = dist.sample()
@@ -237,7 +235,7 @@ class Policy(nn.Module):
                     # parallel execution (True parallel)
                     o, r, terminated, truncated,  infos = self.envs.step(curent_action.numpy())
                     dones = terminated | truncated
-                    np_dones = np.array(envs_next_d, dtype=np.float32)
+                    np_dones = np.array(dones, dtype=np.float32)
                     
                     # store all data in buffers
                     o = self.to_tensor(o)
@@ -251,6 +249,7 @@ class Policy(nn.Module):
                     action_buf[t] = curent_action.long()
                     logp_buf[t] = current_action_logp
                     values_buf[t] = current_value
+                    done_buf[t] = envs_next_d
                     
                     # recover last observatio when env is reset
                     for i in range(len(dones)):
@@ -344,8 +343,8 @@ class Policy(nn.Module):
                     policy_loss = -torch.min(policy_ratio, policy_clip).mean()
                     
                     # Value loss
-                    critic_loss_clip = value + torch.clamp(current_values - value, -self.clip_v, self.clip_v) 
-                    critic_loss = F.mse_loss(target_return, critic_loss_clip)
+                    #clip_current_value = torch.clamp(current_values, value-self.clip_v, value+self.clip_v)
+                    critic_loss = F.mse_loss(current_values, target_return)
 
                     # entropy term
                     entropy_loss  = -dist.entropy().mean()
@@ -366,7 +365,7 @@ class Policy(nn.Module):
                     entropy_epoch += entropy_loss.item()
 
                     
-                print (f"[epoch {epoch} entropy: {-1*entropy_loss/c}]")
+                print (f"[epoch {epoch} entropy: {-entropy_epoch/c}]")
                
             self._evaluate()
             self.scheduler.step()
