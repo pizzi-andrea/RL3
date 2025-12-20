@@ -53,28 +53,19 @@ class Policy(nn.Module):
             
         self.flatten = nn.Sequential(
             nn.Flatten(),
-            layer_init_(nn.Linear(4096, 1024)),
+            layer_init_(nn.Linear(4096, 512)),
             nn.ReLU(),
         )
 
         # Value function Estimator ########################
         self.V = nn.Sequential(
-            layer_init_(nn.Linear(in_features=1024, out_features=512)),
-            nn.Tanh(),
-            layer_init_(nn.Linear(in_features=512, out_features=128)),
-            nn.Tanh(),
-            layer_init_(nn.Linear(in_features=128, out_features=1), std=1.)
-
+            layer_init_(nn.Linear(in_features=512, out_features=1), std=1),
         )
         #####################################################
 
         # Policy Estimator ##################################
         self.P = nn.Sequential(
-            layer_init_(nn.Linear(in_features=1024, out_features=1024)),
-            nn.Tanh(),
-            layer_init_(nn.Linear(in_features=1024, out_features=512)),
-            nn.Tanh(),
-            layer_init_(nn.Linear(in_features=512, out_features=self.K), std=0.01)
+            layer_init_(nn.Linear(in_features=512, out_features=self.K), std=0.01),
         )
         ######################################################
         
@@ -189,7 +180,6 @@ class Policy(nn.Module):
         :param state: current observation
         """
         policy_logits, v = self.forward(state)
-        print(self.training)
 
         # use stochastic policy
         dist = torch.distributions.Categorical(logits=policy_logits)
@@ -251,14 +241,6 @@ class Policy(nn.Module):
                     values_buf[t] = current_value
                     done_buf[t] = envs_next_d
                     
-                    # recover last observatio when env is reset
-                    for i in range(len(dones)):
-                        if dones[i]:
-                            if "final_observation" in infos:
-                                obs_buf[t][i] = self.to_tensor(infos["final_observation"][i])
-                                self.o_next[i] =  o[i]
-                                print(f"Reset env {i}, term_normal={terminated[i]}")
-                    
                     ############################################################################
                 
                 # Explit next state and cpmpute advantages via GAE procedure
@@ -302,7 +284,7 @@ class Policy(nn.Module):
             
             # Prepare train dataset 
             dataset = torch.utils.data.TensorDataset(obs_buf, action_buf, logp_buf, advantages, target_return, values_buf)
-            loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
+            loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
             ###############################################################################################################
             
             
@@ -314,6 +296,7 @@ class Policy(nn.Module):
  
                 print(f"[train epoch: {epoch}]")
                 entropy_epoch = 0
+                loss_epoch = 0
                 c = 0
                 
                 # iter. over batchs
@@ -363,9 +346,12 @@ class Policy(nn.Module):
                     # login
                     c += 1
                     entropy_epoch += entropy_loss.item()
+                    loss_epoch += loss.item()
+
 
                     
                 print (f"[epoch {epoch} entropy: {-entropy_epoch/c}]")
+                print (f"[epoch {epoch} loss: {loss_epoch/c}]")
                
             self._evaluate()
             self.scheduler.step()
