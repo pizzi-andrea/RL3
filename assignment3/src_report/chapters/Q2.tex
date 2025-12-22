@@ -9,10 +9,12 @@ Solve the CarRacing-v2 gym environment using PPO algorithm
 
 To solve the problem presented by the CarRacing-v2 environment we chose to implement an advanced and highly optimized version of the Proximal Policy Optimization algorithm freely inspired by the proposed Stable-Baseline3 library following the indications of the paper \cite{huang2022a2cspecialcaseppo} and blog \cite{shengyi2022the37implementation}.
 
-The choice to implement the PPO algorithm was guided by the papers made available. From the paper \cite{} regarding the PPO it was clear that the A2C algorithm, although adequate to solve the problem in question, is not the most efficient and effective for a complex environment such as that of CarRacing, therefore it was excluded a priori. The DDQN+PER algorithm, on the other hand, was not taken into consideration given the objective limitation of the DDQN algorithm even if improved with the Prioritized Experience Replay buffer which improves its convergence rate and makes DDQN applicable even to complex problems \cite{}. The TRPO was not chosen given the possibility of implementing the PPO algorithm which, compared to the TRPO, avoids explicitly calculating the particularly complex Trust Region \cite{}. Finally, the World Models, although known to have great potential in multiple environments, \cite{} was deemed excessively advanced for the task in question, therefore the final choice fell on PPO.
+The choice to implement the PPO algorithm was guided by the papers made available. From the paper \cite{schulman2017proximalpolicyoptimizationalgorithms} regarding the PPO it was clear that the A2C algorithm, although adequate to solve the problem in question, is not the most efficient and effective for a complex environment such as that of CarRacing, therefore it was excluded a priori. The DDQN+PER algorithm, on the other hand, was not taken into consideration given the objective limitation of the DDQN algorithm even if improved with the Prioritized Experience Replay buffer which improves its convergence rate and makes DDQN applicable even to complex problems \cite{schaul2016prioritizedexperiencereplay}. The TRPO was not chosen given the possibility of implementing the PPO algorithm which, compared to the TRPO, avoids explicitly calculating the particularly complex Trust Region \cite{schulman2017proximalpolicyoptimizationalgorithms}. Finally, the World Models, although known to have great potential in multiple environments, \cite{https://doi.org/10.5281/zenodo.1207631} was deemed excessively advanced for the task in question, therefore the final choice fell on Proximal Policy Optimization algorithm.
 
 \subsubsection{Analysis of the problem}
-At first glance, it might seem that the problem in question lacks all the fundamental aspects of a Markov Decision Process, making any Reinforcement Learning algorithm inapplicable (just consider that policy formulations, value functions, and Bellman equations would be meaningless). This is because by observing the car's position in a single frame of the scene, we cannot deduce any information about the current state of velocity, direction of movement, etc., necessary to understand how the car will move and, consequently, the next state of the system.
+At first inspection, the problem appears to lack the defining components of a Markov decision process, rendering standard reinforcement learning frameworks inapplicable. In particular, essential constructs such as well-defined policies, value functions, and Bellman optimality equations do not seem to be meaningfully expressible in this setting. 
+
+This problem is caused because by observing the position of the car in a single frame of the scene, we cannot infer any information about the current state of speed, direction of movement, etc..., which is necessary to understand how the car will move and, consequently, the next state of the system.
 
 \begin{figure}[H]
 	\centering
@@ -45,6 +47,9 @@ The innovations introduced compared to the classic PPO implementation can be sum
 	\item Advance Buffering Methods
 	
 	\item Async environments implementation (for high parallelization)
+	
+	\item Default use of the GAE algorithm
+	
 \end{itemize}
 
 This set of implementation details have led to remarkable results without distorting the basic fundamental idea.
@@ -129,18 +134,18 @@ The use of a replay buffer is one of the distinctive and fundamental features of
 	\caption{Initialize buffers} 
 	\label{codice:buffers}
 	\begin{minted}[frame=lines, framesep=2mm, baselinestretch=1.2, bgcolor=bg, linenos]{python}
-		# buffer D ########################################
-		obs_buf = torch.zeros((self.M, self.N, 3, self.img_size[0], self.img_size[1]))
-		reward_buf = torch.zeros((self.M, self.N))
-		values_buf = torch.zeros((self.M, self.N))
-		logp_buf = torch.zeros((self.M, self.N))
-		action_buf = torch.zeros((self.M, self.N))
-		done_buf = torch.zeros((self.M, self.N))
-		##########################################
+# buffer D ########################################
+obs_buf = torch.zeros((self.M, self.N, 3, self.img_size[0], self.img_size[1]))
+reward_buf = torch.zeros((self.M, self.N))
+values_buf = torch.zeros((self.M, self.N))
+logp_buf = torch.zeros((self.M, self.N))
+action_buf = torch.zeros((self.M, self.N))
+done_buf = torch.zeros((self.M, self.N))
+##########################################
 	\end{minted}
 \end{listing}
 
-The provided implementation does not specifically define a 2D buffer as indicated by the reference paper but for simplicity of implementation it was decided to implement it as a series of independent parallel buffers of size $(NxM)$.
+The implementation does not explicitly construct a two-dimensional buffer as described in the reference paper. Instead, for ease of implementation, the buffer is realized as a collection of independent, parallel buffers, each of size $(N \times M)$
 \subsubsection{Rollout Procedure}
 
 The PPO rollout procedure consists of generating a series of trajectories $(o_t, r_t, v_t, d_t, d_{t+1}, o_{t+1})_{i=1}^{N}$ from the $N$ environments for M time instants and then storing them within the appropriate buffers. Thanks to the use of the vectorized and parallel environment provided by gymnasium, the entire rollout procedure is executed efficiently in batch. The trajectories collected, as already stated, will then be used to calculate the advantage and the Target return value as well as in the subsequent learning phase.
@@ -148,7 +153,7 @@ The PPO rollout procedure consists of generating a series of trajectories $(o_t,
 \begin{listing}[H]
 	\centering
 	\caption{Roll-out procedure} 
-	\label{codice:rollout}
+	\label{codice:rollout_1}
 	\begin{minted}[frame=lines, framesep=2mm, baselinestretch=1.2, bgcolor=bg, linenos]{python}
 for t in range(self.M):
 
@@ -178,7 +183,7 @@ The buffer's operating logic is to simultaneously make available the information
 \begin{listing}[H]
 	\centering
 	\caption{Update buffers} 
-	\label{codice:rollout}
+	\label{codice:rollout_2}
 	\begin{minted}[frame=lines, framesep=2mm, baselinestretch=1.2, bgcolor=bg, linenos]{python}
 for t in range(self.M):
 	
@@ -265,19 +270,115 @@ Using the GAE formulation for calculating the benefit, the target return can be 
 
 \begin{listing}[H]
 	\centering
-	\caption{Target return computation respect GAE value} 
-	\label{codice:tr}
+	\caption{Target Return computation} 
+	\label{codice:TD}
 	\begin{minted}[frame=lines, framesep=2mm, baselinestretch=1.2, bgcolor=bg, linenos]{python}
 target_return = advantages + values_buf # TD
 	\end{minted}
 \end{listing}
-\subsubsection{Learning Procedure}
-In the learning phase, the PPO algorithm exploits the knowledge about the behavior of the environment acquired during the rollout phase to update the estimate of the policy as well as the value function.
 
-The most relevant part in the learning phase is the calculation of the loss value determined by three loss values:
+
+
+
+\subsubsection{Learning Procedure}
+In the learning phase, the PPO algorithm exploits the knowledge about the behavior of the environment acquired during the rollout phase to update the estimate of the policy as well as the value function. The most relevant part in the learning phase is the calculation of the loss value determined by three loss values.
+
+The first loss term is called clipped or surrogate policy loss and are composed of two principal terms: the Ratio and estimated advantage. The Ratio expresses how much the currently estimated policy (learning) varies compared to the previous one (rollout). It can be computed as follow:
+\begin{listing}[H]
+	\centering
+	\caption{Target return computation respect GAE value} 
+	\label{codice:tr}
+	\begin{minted}[frame=lines, framesep=2mm, baselinestretch=1.2, bgcolor=bg, linenos]{python}
+policy_logits, current_values = self.forward(obs)
+current_values = current_values.flatten()
+dist = torch.distributions.Categorical(logits=policy_logits)
+current_policy_logp = dist.log_prob(action)
+ratio = torch.exp(current_policy_logp - logp)
+	\end{minted}
+\end{listing}
+ 
+Using the Current Policy probabilities (calculated via the Actor network), calculate the ratio between the old buffered policy and the current one (note that in the first iteration the ratio will be 1, subsequent weight updates will make this value different than 1). The advantage used is instead the one estimated during the rollout phase (using the Value Function).
+
+\begin{listing}[H]
+	\centering
+	\caption{Computation for Policy} 
+	\label{codice:ratio}
+	\begin{minted}[frame=lines, framesep=2mm, baselinestretch=1.2, bgcolor=bg, linenos]{python}
+policy_ratio = advantage * ratio
+	\end{minted}
+\end{listing}
+
+This loss term determines how to update the probability of actions taken during the rollout. It is constrained in two ways: first by using a probability ratio to enable multiple updates on collected data, and second by clipping this ratio within a neighborhood of $\epsilon$ to prevent destructive policy updates.
+\begin{listing}[H]
+	\centering
+	\caption{Computation surrogate policy loss} 
+	\label{codice:policy_loss}
+	\begin{minted}[frame=lines, framesep=2mm, baselinestretch=1.2, bgcolor=bg, linenos]{python}
+policy_clip = advantage * torch.clamp(ratio, 1 - self.epsilon, 1 + self.epsilon)
+policy_loss = -torch.min(policy_ratio, policy_clip).mean()
+	\end{minted}
+\end{listing}
+
+The Value Loss is calculated by first constraining the current value estimate so that it does not deviate excessively from the previous rollout value (using a clipping mechanism similar to the policy's). The final loss term is then computed as the Mean Squared Error (MSE) between this constrained (clipped) value estimate and the target return obtained during the rollout.
+
+\begin{listing}[H]
+	\centering
+	\caption{Computation Clipped Value Loss} 
+	\label{codice:value_loss}
+	\begin{minted}[frame=lines, framesep=2mm, baselinestretch=1.2, bgcolor=bg, linenos]{python}
+# Value loss
+critic_loss_clip = value + torch.clamp(current_values - value, -self.clip_v, self.clip_v) 
+critic_loss = F.mse_loss(target_return, critic_loss_clip)
+	\end{minted}
+\end{listing}
+
+Finally, the last term to discuss concerns Entropy. The entropy term is an additional value that allows us to account for the policy's need for exploration. Without this term, the policy would risk "premature convergence", becoming deterministic too early and getting stuck in local optima instead of exploring better strategies.
+
+\begin{listing}[H]
+	\centering
+	\caption{Computation Entropy Loss} 
+	\label{codice:entropy_loss}
+	\begin{minted}[frame=lines, framesep=2mm, baselinestretch=1.2, bgcolor=bg, linenos]{python}
+# entropy term
+entropy_loss  = -dist.entropy().mean()
+	\end{minted}
+\end{listing}
+
+The general behavior of this term is expected to be quite high in the first iterations of the algorithm and then gradually decay as the policy estimate improves.
+
+Finally, the sum of all the analyzed terms determines the total loss value. 
+
+\begin{listing}[H]
+	\centering
+	\caption{Target return computation respect GAE value} 
+	\label{codice:loss}
+	\begin{minted}[frame=lines, framesep=2mm, baselinestretch=1.2, bgcolor=bg, linenos]{python}
+loss = policy_loss + self.c1 * critic_loss + self.c2 * entropy_loss
+	\end{minted}
+\end{listing}
+
+Note the two additional factors $c1$ and $c2$, which respectively regulate the influence of the value loss term and the entropy term, allowing for precise control of the optimization step and the entropy contribution to the total loss value.
 
 \subsubsection{Hyper-parameters and Results}
+\begin{table}[t]
+	\centering
+	\caption{PPO hyper-parameters}
+	\label{tab:ppo_hyperparameters_columns}
+	\resizebox{\textwidth}{!}{
+		\begin{tabular}{ccccccccccccccc}
+			\hline
+			$N$ & $M$ & $K$ & $I$ & Img size & $\epsilon$ & $\gamma$ & $\lambda$ & $\|\nabla\|_{\max}$ & $\epsilon_v$ & $c_2$ & $c_1$ & Mean Reward \\
+			\hline
+			8 & 512 & 5 & 500 & $96\times96$ & 0.2 & 0.99 & 0.95 & 0.5 & 0.2 & 0.02 & 0.5 & 920 $\pm$ 20 \\
+			\hline
+		\end{tabular}
+	}
+\end{table}
+The hyperparameters tested are the recommended ones obtained by analyzing several PPO jobs with different environments. The results obtained with these hyperparameters are very satisfactory, with an average reward around 920, confirmed in rendering mode by a perfect execution of the generated path.
+
 
 \subsubsection{Conclusions}
+
+The implemented version of the PPO algorithm turns out to be optimal for the solved problem, achieving exceptional results on a par with more complex techniques such as the word model. This proves that the choice of using the PPO was adequate for the proposed task as already analyzed in the introduction.
 
 \end{document} 

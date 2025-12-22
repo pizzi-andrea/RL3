@@ -7,10 +7,11 @@
 
 \begin{document}
 	
-	\section{Question I (Theory)}
+	\section{Question I}
 	\subsection{Problem}
 	
 	Suppose an environment with 2 possible actions and a 2-dimensional state representation $x(s) \in \mathbb{R}^2$.
+	
 	Consider the REINFORCE algorithm with the following Linear Function Approximator (LFA) policy:
 	
 	\begin{equation}
@@ -19,19 +20,19 @@
 	
 	The action is selected as:
 	
-	\begin{equation}
+	\begin{equation*}
 		a = \mathbb{1}_{\pi_w(a=1 \mid s) > 0.5}
-	\end{equation}
+	\end{equation*}
 	
 	where $w^{(0)} = [0.8, 1]^\top$ and $\sigma(t) = \frac{1}{1 + e^{-t}}$.
 	
 	Suppose you run an episode and obtain:
 	
-	\begin{align}
+	\begin{align*}
 		x(s_0) &= [1,0]^\top, \quad a_0 = 0, \quad r_1 = 0 \\
 		x(s_1) &= [1,0]^\top, \quad a_1 = 1, \quad r_2 = 1 \\
 		x(s_2) &= [0,1]^\top
-	\end{align}
+	\end{align*}
 	
 	Show the weight update according to the REINFORCE algorithm with $\alpha=0.1$, $\gamma=0.9$.
 	
@@ -43,17 +44,20 @@
 	
 	REINFORCE is the simplest algorithm in the Policy gradient methods family.
 	
+	Now let's define the basic equations needed to update the gradient.The first one concerns the weight update.
 	\begin{equation}
 		w_{t+1} = w_t + \alpha \nabla_w \ln \pi_w(a_t \mid s_t)\, G_t
 	\end{equation}
 	
-	The return is defined as:
+	where $G_t$ is:
 	
 	\begin{equation}
 		G_t = \sum_{k=t+1}^{T} \gamma^{k-t-1} R_k .
 	\end{equation}
 	
-	We also use:
+	and assume $w = w^{(0)}$
+	
+	We also say:
 	
 	\begin{equation}
 		\label{eq_policy_zero_fixed}
@@ -62,7 +66,27 @@
 		= \frac{e^{-w^\top x(s)}}{1 + e^{-w^\top x(s)}} .
 	\end{equation}
 	
-	\subsubsection*{First update ($t=0$)}
+	Note that since we use the Monte Carlo Return we would have an episodic estimate of the policy. This means that the policy will remain constant at the weights for the algorithm episodes and will only be updated at the end of the episodes.
+	
+	The relative gradients will then be:
+	
+	\begin{equation}
+		\begin{alignedat}{2}
+			\nabla_w \ln \pi_w(a = 1 \mid s_1)
+			&= \frac{e^{-w^\top x(s_1)}}{1 + e^{-w^\top x(s_1)}}\, x(s_1)
+			\qquad &
+			\nabla_w \ln \pi_w(a = 0 \mid s_0)
+			&= -\frac{x(s_0)}{1 + e^{-w^\top x(s_0)}} .
+		\end{alignedat}
+	\end{equation}
+	
+	Now compute algorithm iterations.
+	
+	\begin{equation*}
+		t \leftarrow 0
+	\end{equation*}
+	
+	
 	
 	Since $a_0 = 0$, we use $\pi_w(a_0 \mid s_0)$ from Eq.~\eqref{eq_policy_zero_fixed}.
 	
@@ -70,26 +94,32 @@
 	
 	\begin{align}
 		\ln \pi_w(a=0 \mid s_0)
-		&= \ln \left( \frac{e^{-w^\top x(s_0)}}{1 + e^{-w^\top x(s_0)}} \right) \\
-		&= - w^\top x(s_0) - \ln(1 + e^{-w^\top x(s_0)}).
+		&= \ln \left( \frac{e^{-w^\top x(s_0)}}{1 + e^{-w^\top x(s_0)}} \right)
 	\end{align}
+	\begin{align*}	
+		&= - w^\top x(s_0) - \ln(1 + e^{-w^\top x(s_0)}).
+	\end{align*}
 	
-	Gradient:
+	then compute $\nabla_w$, the gradient respect $w$:
 	
 	\begin{align}
-		\label{eq_gradient_log_clean}
-		\nabla_w \ln \pi_w(a=0 \mid s_0)
-		&= -x(s_0) + \frac{e^{-w^\top x(s_0)}}{1 + e^{-w^\top x(s_0)}} x(s_0) \\
+		\label{eq:gradient_log_clean}
+		\nabla_w \ln \pi_w(a = 0 \mid s_0)
+		&= -x(s_0)
+		+ \frac{e^{-w^\top x(s_0)}}{1 + e^{-w^\top x(s_0)}}\, x(s_0) \\
 		&= -\frac{x(s_0)}{1 + e^{-w^\top x(s_0)}} .
 	\end{align}
 	
-	Return:
+	Until the return value is 
 	
 	\begin{align}
-		G_0 &= r_1 + \gamma r_2 = 0 + 0.9 \cdot 1 = 0.9 .
+		G_0 \leftarrow \sum_{k=1}^{2} \gamma^{k-1}R_k
 	\end{align}
+	\begin{align*}
+		G_0 &= r_1 + \gamma r_2 = 0 + 0.9 \cdot 1 = 0.9 .
+	\end{align*}
 	
-	Update:
+	finally the update will be:
 	
 	\begin{align}
 		w_1 &= w_0 + \alpha \nabla_w \ln\pi_w(a_0 \mid s_0) \, G_0.
@@ -119,41 +149,47 @@
 			\end{pmatrix}
 		}
 	\end{equation}
-	
-	\subsubsection*{Second update ($t=1$)}
+	%% second pages
+	Let's iterate for the second and final step.
+	\begin{equation*}
+		t \leftarrow 1
+	\end{equation*}
 	
 	Now $a_1 = 1$, so:
 	
 	\begin{equation}
-		\pi_w(a=1 \mid s_1) = \sigma(w_1^\top x(s_1)).
+		\pi_w(a=1 \mid s_1) = \sigma(w^\top x(s_1)).
 	\end{equation}
 	
 	Log-probability:
 	
 	\begin{equation}
 		\ln \pi_w(a=1 \mid s_1)
-		= - \ln\left( 1 + e^{-w_1^\top x(s_1)} \right).
+		= - \ln\left( 1 + e^{-w^\top x(s_1)} \right).
 	\end{equation}
 	
-	Gradient:
+	then the gradient $\nabla_w$ respect $w$ is:
 	
 	\begin{align}
 		\nabla_w \ln \pi_w(a=1 \mid s_1)
-		&= \frac{e^{-w_1^\top x(s_1)}}{1 + e^{-w_1^\top x(s_1)}} x(s_1).
+		&= \frac{e^{-w^\top x(s_1)}}{1 + e^{-w^\top x(s_1)}} x(s_1).
 	\end{align}
 	
 	Return:
 	
 	\begin{equation}
-		G_1 = r_2 = 1.
+		G_1 \leftarrow \sum_{k=2}^{2}\gamma^{k-2}R_{k}
 	\end{equation}
+	\begin{align}
+		G_1 = r_2 = 1.
+	\end{align}
 	
 	Update:
 	
 	\begin{align}
 		w_2 
 		&= 
-		w_1 + \alpha \frac{e^{-w_1^\top x(s_1)}}{1 + e^{-w_1^\top x(s_1)}} x(s_1) \, G_1.
+		w_1 + \alpha \frac{e^{-w^\top x(s_1)}}{1 + e^{-w^\top x(s_1)}} x(s_1) \, G_1.
 	\end{align}
 	
 	Substitute values:
@@ -170,7 +206,7 @@
 			0
 		\end{pmatrix}
 		\cdot
-		\frac{e^{-0.738}}{1 + e^{-0.738}}
+		\frac{e^{-0.8}}{1 + e^{-0.8}}
 	\end{equation}
 	
 	Final result:
@@ -179,7 +215,7 @@
 		\boxed{
 			w_2 = 
 			\begin{pmatrix}
-				0.770 \\
+				0.690 \\
 				1
 			\end{pmatrix}
 		}
